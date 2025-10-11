@@ -1,0 +1,16 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Deployment Progress</title>
+</head>
+<body>
+  <h1>Deployment Progress</h1>
+  <pre id="messages"></pre>
+  <script>
+    const evtSource = new EventSource("/events");
+    evtSource.onmessage = function(event) {
+      document.getElementById("messages").textContent += event.data + "\n";
+    };
+  </script>
+</body>
+</html>
