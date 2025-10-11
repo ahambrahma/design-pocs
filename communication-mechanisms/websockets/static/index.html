@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Socket.IO Echo Demo</title>
+  <script src="https://unpkg.com/socket.io-client@2.4.0/dist/socket.io.js"></script>
+</head>
+<body>
+  <h1>Socket.IO Echo Demo</h1>
+  <input id="msg" type="text" placeholder="Type a message">
+  <button id="sendBtn">Send</button>
+  <pre id="output"></pre>
+  <script>
+    document.addEventListener('DOMContentLoaded', function () {
+      var socket = io({ path: '/socket.io' });
+
+      socket.on("connect", function () {
+        console.log("connected", socket.id);
+        document.getElementById("output").textContent += "Connected\n";
+      });
+
+      socket.on("error", function (err) {
+        console.error("socket error:", err);
+      });
+
+      socket.on("echo", function (msg) {
+        document.getElementById("output").textContent += "Echo: " + msg + "\n";
+      });
+
+      function sendMsg() {
+        var msg = document.getElementById("msg").value;
+        if (!socket || socket.disconnected) {
+          console.warn("socket not ready");
+          return;
+        }
+        console.log("emit echo:", msg);
+        socket.emit("echo", msg);
+      }
+
+      document.getElementById("sendBtn").addEventListener("click", sendMsg);
+    });
+  </script>
+</body>
+</html>
