@@ -7,7 +7,9 @@
   <h1>Deployment Progress</h1>
   <pre id="messages"></pre>
   <script>
-    const evtSource = new EventSource("/events");
+    const pathParts = window.location.pathname.split('/');
+    const deploymentId = pathParts[pathParts.length - 1];
+    const evtSource = new EventSource("/events/" + deploymentId);
     evtSource.onmessage = function(event) {
       document.getElementById("messages").textContent += event.data + "\n";
     };
