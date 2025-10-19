@@ -2,7 +2,7 @@ package main
 
 import (
 	"exclusive-locks/db"
-	"exclusive-locks/updateskip"
+	"exclusive-locks/optimisticlock"
 )
 
 func main() {
@@ -14,6 +14,9 @@ func main() {
 	// seatBookingWithUpdate := &update.SeatBookingWithUpdate{}
 	// seatBookingWithUpdate.BookSeats()
 
-	SeatBookingWithUpdateSkip := &updateskip.SeatBookingWithUpdateSkip{}
-	SeatBookingWithUpdateSkip.BookSeats()
+	// SeatBookingWithUpdateSkip := &updateskip.SeatBookingWithUpdateSkip{}
+	// SeatBookingWithUpdateSkip.BookSeats()
+
+	seatBookingWithOptimisticLock := &optimisticlock.OptimisticLock{}
+	seatBookingWithOptimisticLock.BookSeats()
 }

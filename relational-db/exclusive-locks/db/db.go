@@ -77,6 +77,13 @@ func resetSeats() {
 	defer CommonPool.Put(conn)
 	_, err := db.Exec("UPDATE seats SET user_id = NULL")
 	if err != nil {
+		fmt.Println("Failed to reset seats: ", err)
+		panic(err)
+	}
+
+	_, err = db.Exec("UPDATE seats_v2 SET user_id = NULL, version = 1")
+	if err != nil {
+		fmt.Println("Failed to reset seats_v2: ", err)
 		panic(err)
 	}
 

@@ -1,18 +1,32 @@
 -- Create tables
-CREATE TABLE users (
+DROP TABLE IF EXISTS seats;
+DROP TABLE IF EXISTS seats_v2;
+DROP TABLE IF EXISTS trips;
+DROP TABLE IF EXISTS users;
+
+
+CREATE TABLE IF NOT EXISTS users (
   id INTEGER PRIMARY KEY,
   name VARCHAR(50) NOT NULL
 );
 
-CREATE TABLE trips (
+CREATE TABLE IF NOT EXISTS trips (
   id INTEGER PRIMARY KEY
 );
 
-CREATE TABLE seats (
+CREATE TABLE IF NOT EXISTS seats (
   id INTEGER PRIMARY KEY,
   number VARCHAR(50) NOT NULL,
   trip_id INTEGER NOT NULL REFERENCES trips(id),
   user_id INTEGER NULL REFERENCES users(id)
+);
+
+CREATE TABLE IF NOT EXISTS seats_v2 (
+  id INTEGER PRIMARY KEY,
+  number VARCHAR(50) NOT NULL,
+  trip_id INTEGER NOT NULL REFERENCES trips(id),
+  user_id INTEGER NULL REFERENCES users(id),
+  version INTEGER NOT NULL DEFAULT 1
 );
 
 -- Seed one trip
@@ -223,3 +237,106 @@ INSERT INTO seats (id, number, trip_id, user_id) VALUES
 (98, 'S98', 1, NULL),
 (99, 'S99', 1, NULL),
 (100, 'S100', 1, NULL);
+
+-- Insert 100 seats for trip_id = 1, all unoccupied (user_id NULL)
+INSERT INTO seats_v2 (id, number, trip_id, user_id, version) VALUES
+(1, 'S1', 1, NULL, 1),
+(2, 'S2', 1, NULL, 1),
+(3, 'S3', 1, NULL, 1),
+(4, 'S4', 1, NULL, 1),
+(5, 'S5', 1, NULL, 1),
+(6, 'S6', 1, NULL, 1),
+(7, 'S7', 1, NULL, 1),
+(8, 'S8', 1, NULL, 1),
+(9, 'S9', 1, NULL, 1),
+(10, 'S10', 1, NULL, 1),
+(11, 'S11', 1, NULL, 1),
+(12, 'S12', 1, NULL, 1),
+(13, 'S13', 1, NULL, 1),
+(14, 'S14', 1, NULL, 1),
+(15, 'S15', 1, NULL, 1),
+(16, 'S16', 1, NULL, 1),
+(17, 'S17', 1, NULL, 1),
+(18, 'S18', 1, NULL, 1),
+(19, 'S19', 1, NULL, 1),
+(20, 'S20', 1, NULL, 1),
+(21, 'S21', 1, NULL, 1),
+(22, 'S22', 1, NULL, 1),
+(23, 'S23', 1, NULL, 1),
+(24, 'S24', 1, NULL, 1),
+(25, 'S25', 1, NULL, 1),
+(26, 'S26', 1, NULL, 1),
+(27, 'S27', 1, NULL, 1),
+(28, 'S28', 1, NULL, 1),
+(29, 'S29', 1, NULL, 1),
+(30, 'S30', 1, NULL, 1),
+(31, 'S31', 1, NULL, 1),
+(32, 'S32', 1, NULL, 1),
+(33, 'S33', 1, NULL, 1),
+(34, 'S34', 1, NULL, 1),
+(35, 'S35', 1, NULL, 1),
+(36, 'S36', 1, NULL, 1),
+(37, 'S37', 1, NULL, 1),
+(38, 'S38', 1, NULL, 1),
+(39, 'S39', 1, NULL, 1),
+(40, 'S40', 1, NULL, 1),
+(41, 'S41', 1, NULL, 1),
+(42, 'S42', 1, NULL, 1),
+(43, 'S43', 1, NULL, 1),
+(44, 'S44', 1, NULL, 1),
+(45, 'S45', 1, NULL, 1),
+(46, 'S46', 1, NULL, 1),
+(47, 'S47', 1, NULL, 1),
+(48, 'S48', 1, NULL, 1),
+(49, 'S49', 1, NULL, 1),
+(50, 'S50', 1, NULL, 1),
+(51, 'S51', 1, NULL, 1),
+(52, 'S52', 1, NULL, 1),
+(53, 'S53', 1, NULL, 1),
+(54, 'S54', 1, NULL, 1),
+(55, 'S55', 1, NULL, 1),
+(56, 'S56', 1, NULL, 1),
+(57, 'S57', 1, NULL, 1),
+(58, 'S58', 1, NULL, 1),
+(59, 'S59', 1, NULL, 1),
+(60, 'S60', 1, NULL, 1),
+(61, 'S61', 1, NULL, 1),
+(62, 'S62', 1, NULL, 1),
+(63, 'S63', 1, NULL, 1),
+(64, 'S64', 1, NULL, 1),
+(65, 'S65', 1, NULL, 1),
+(66, 'S66', 1, NULL, 1),
+(67, 'S67', 1, NULL, 1),
+(68, 'S68', 1, NULL, 1),
+(69, 'S69', 1, NULL, 1),
+(70, 'S70', 1, NULL, 1),
+(71, 'S71', 1, NULL, 1),
+(72, 'S72', 1, NULL, 1),
+(73, 'S73', 1, NULL, 1),
+(74, 'S74', 1, NULL, 1),
+(75, 'S75', 1, NULL, 1),
+(76, 'S76', 1, NULL, 1),
+(77, 'S77', 1, NULL, 1),
+(78, 'S78', 1, NULL, 1),
+(79, 'S79', 1, NULL, 1),
+(80, 'S80', 1, NULL, 1),
+(81, 'S81', 1, NULL, 1),
+(82, 'S82', 1, NULL, 1),
+(83, 'S83', 1, NULL, 1),
+(84, 'S84', 1, NULL, 1),
+(85, 'S85', 1, NULL, 1),
+(86, 'S86', 1, NULL, 1),
+(87, 'S87', 1, NULL, 1),
+(88, 'S88', 1, NULL, 1),
+(89, 'S89', 1, NULL, 1),
+(90, 'S90', 1, NULL, 1),
+(91, 'S91', 1, NULL, 1),
+(92, 'S92', 1, NULL, 1),
+(93, 'S93', 1, NULL, 1),
+(94, 'S94', 1, NULL, 1),
+(95, 'S95', 1, NULL, 1),
+(96, 'S96', 1, NULL, 1),
+(97, 'S97', 1, NULL, 1),
+(98, 'S98', 1, NULL, 1),
+(99, 'S99', 1, NULL, 1),
+(100, 'S100', 1, NULL, 1);
