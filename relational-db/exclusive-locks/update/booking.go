@@ -40,6 +40,7 @@ func (s *SeatBookingWithUpdate) bookSeat(wg *sync.WaitGroup, userID int) error {
 	var selectedSeatNumber string
 	var selectedSeatUserID *int
 
+	// DB handles retrying this query in case of lock conflict internally
 	row := txn.QueryRow("SELECT id, number, user_id FROM seats WHERE user_id IS NULL LIMIT 1 FOR UPDATE")
 	err = row.Scan(&selectedSeatID, &selectedSeatNumber, &selectedSeatUserID)
 
