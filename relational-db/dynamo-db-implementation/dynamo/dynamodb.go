@@ -14,34 +14,6 @@ type DynamoDB struct {
 	tableKeyAttributes map[string]KeyAttributes
 }
 
-type CreateTableInput struct {
-	TableName  string
-	Attributes []string
-	Keys       KeyAttributes
-}
-
-type PutItemInput struct {
-	TableName     string
-	KeyAttributes map[string]string
-	Values        map[string]string
-}
-
-type GetItemOutput struct {
-	Values map[string]string
-}
-
-type KeyAttributes struct {
-	PartitionKey string
-	SortKey      *string
-}
-
-type GetItemInput struct {
-	TableName            string
-	PartitionKey         string
-	SortKey              *string
-	ProjectionExpression string
-}
-
 func NewDynamoDB() *DynamoDB {
 	db, err := sql.Open("mysql", "root@tcp(127.0.0.1:3306)/dynamodb?charset=utf8")
 	if err != nil {
@@ -225,4 +197,73 @@ func (d *DynamoDB) GetItem(input GetItemInput) (*GetItemOutput, error) {
 		Values: resultValues,
 	}, nil
 
+}
+
+func (d *DynamoDB) Query(input QueryInput) (*QueryOutput, error) {
+	if input.TableName == "" || input.KeyConditionExpression == "" {
+		return nil, fmt.Errorf("table name and partition key are required")
+	}
+
+	tableName := input.TableName
+
+	keyAttrs, ok := d.tableKeyAttributes[tableName]
+	if !ok {
+		return nil, fmt.Errorf("table %s does not exist", tableName)
+	}
+
+	// Build the SELECT statement and args
+	args := make([]interface{}, 0, len(input.KeyValues))
+	for _, v := range input.KeyValues {
+		args = append(args, v)
+	}
+	statement := fmt.Sprintf("SELECT %s FROM %s WHERE %s", input.ProjectionExpression, input.TableName, input.KeyConditionExpression)
+	if !input.ScanIndexForward && keyAttrs.SortKey != nil && *keyAttrs.SortKey != "" {
+		statement += " ORDER BY " + *keyAttrs.SortKey + " DESC"
+	} else {
+		statement += " ORDER BY " + *keyAttrs.SortKey + " ASC"
+	}
+
+	fmt.Println("Query statement: ", statement, " args:", args)
+
+	// Execute the query
+	rows, err := d.dbConn.Query(statement, args...)
+	if err != nil {
+		fmt.Printf("Failed to query items from table %s: %v\n", tableName, err)
+		return nil, err
+	}
+	defer rows.Close()
+
+	// Prepare to scan the results
+	columns := strings.Split(input.ProjectionExpression, ",")
+	resultItems := make([]map[string]string, 0)
+
+	for rows.Next() {
+		values := make([]sql.NullString, len(columns))
+		valuePtrs := make([]interface{}, len(columns))
+		for i := range columns {
+			valuePtrs[i] = &values[i]
+		}
+
+		err := rows.Scan(valuePtrs...)
+		if err != nil {
+			fmt.Printf("Failed to scan item from table %s: %v\n", tableName, err)
+			return nil, err
+		}
+
+		item := make(map[string]string)
+		for i, col := range columns {
+			if values[i].Valid {
+				item[strings.TrimSpace(col)] = values[i].String
+			} else {
+				item[strings.TrimSpace(col)] = ""
+			}
+		}
+		resultItems = append(resultItems, item)
+	}
+
+	fmt.Printf("Queried items from table %s: %v\n", tableName, resultItems)
+
+	return &QueryOutput{
+		Items: resultItems,
+	}, nil
 }

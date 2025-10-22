@@ -5,6 +5,7 @@ import "dynamo-db-implementation/dynamo"
 func main() {
 	ddb := dynamo.NewDynamoDB()
 	userId := "user_id"
+	orderId := "order_id"
 	ddb.CreateTable(dynamo.CreateTableInput{
 		TableName: "users",
 		Attributes: []string{
@@ -26,8 +27,8 @@ func main() {
 			"amount",
 			"status"},
 		Keys: dynamo.KeyAttributes{
-			PartitionKey: "order_id",
-			SortKey:      nil,
+			PartitionKey: userId,
+			SortKey:      &orderId,
 		},
 	})
 
@@ -59,11 +60,11 @@ func main() {
 		TableName: "orders",
 		KeyAttributes: map[string]string{
 			"order_id": "order#1",
+			"user_id":  "user#1",
 		},
 		Values: map[string]string{
-			"user_id": "user#1",
-			"amount":  "250",
-			"status":  "pending",
+			"amount": "250",
+			"status": "pending",
 		},
 	})
 
@@ -71,11 +72,11 @@ func main() {
 		TableName: "orders",
 		KeyAttributes: map[string]string{
 			"order_id": "order#2",
+			"user_id":  "user#1",
 		},
 		Values: map[string]string{
-			"user_id": "user#1",
-			"amount":  "450",
-			"status":  "completed",
+			"amount": "450",
+			"status": "completed",
 		},
 	})
 
@@ -86,5 +87,15 @@ func main() {
 		PartitionKey:         "org#1",
 		SortKey:              &user1,
 		ProjectionExpression: "org_id,user_id,name,age",
+	})
+
+	ddb.Query(dynamo.QueryInput{
+		TableName:              "orders",
+		KeyConditionExpression: "user_id = ?",
+		KeyValues: map[string]string{
+			"user_id": "user#1",
+		},
+		ProjectionExpression: "user_id,order_id,amount,status",
+		ScanIndexForward:     false,
 	})
 }
