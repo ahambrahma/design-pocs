@@ -127,7 +127,7 @@ func (d *DynamoDB) PutItem(input PutItemInput) error {
 	}
 
 	statement := fmt.Sprintf(
-		"INSERT INTO %s (%s) VALUES (%s);",
+		"REPLACE INTO %s (%s) VALUES (%s);",
 		tableName,
 		strings.Join(columns, ", "),
 		strings.Join(placeholders, ", "),
@@ -228,16 +228,41 @@ func (d *DynamoDB) Query(input QueryInput) (*QueryOutput, error) {
 
 	keyAttrs := attrs.KeyAttributes
 
+	// 1. Determine the effective sort key for ordering.
+	var effectiveSortKey string
+
+	if input.IndexName != nil && input.IndexName != "" {
+		// Assume IndexName is an LSI name.
+		indexNameStr := input.IndexName.(string)
+		found := false
+		for _, lsi := range attrs.LSIs {
+			if lsi.IndexName == indexNameStr {
+				effectiveSortKey = lsi.SortKey // Use LSI's SortKey
+				found = true
+				break
+			}
+		}
+		if !found {
+			// A true DynamoDB implementation would check GSI/LSI existence.
+			return nil, fmt.Errorf("index %s does not exist on table %s (or is not a registered LSI)", indexNameStr, tableName)
+		}
+	} else if keyAttrs.SortKey != nil {
+		// Use the primary SortKey if no index is specified.
+		effectiveSortKey = keyAttrs.SortKey.(string)
+	}
+
 	// Build the SELECT statement and args
 	args := make([]interface{}, 0, len(input.KeyValues))
 	for _, v := range input.KeyValues {
 		args = append(args, v)
 	}
 	statement := fmt.Sprintf("SELECT %s FROM %s WHERE %s", input.ProjectionExpression, input.TableName, input.KeyConditionExpression)
-	if !input.ScanIndexForward && keyAttrs.SortKey != nil && keyAttrs.SortKey != "" {
-		statement += " ORDER BY " + keyAttrs.SortKey.(string) + " DESC"
-	} else {
-		statement += " ORDER BY " + keyAttrs.SortKey.(string) + " ASC"
+	if effectiveSortKey != "" {
+		if !input.ScanIndexForward {
+			statement += " ORDER BY " + effectiveSortKey + " DESC"
+		} else {
+			statement += " ORDER BY " + effectiveSortKey + " ASC"
+		}
 	}
 
 	// fmt.Println("Query statement: ", statement, " args:", args)
