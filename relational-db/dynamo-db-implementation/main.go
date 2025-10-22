@@ -15,7 +15,7 @@ func main() {
 			"age"},
 		Keys: dynamo.KeyAttributes{
 			PartitionKey: "org_id",
-			SortKey:      &userId,
+			SortKey:      userId,
 		},
 	})
 
@@ -28,7 +28,13 @@ func main() {
 			"status"},
 		Keys: dynamo.KeyAttributes{
 			PartitionKey: userId,
-			SortKey:      &orderId,
+			SortKey:      orderId,
+		},
+		LSIs: []dynamo.LocalSecondaryIndex{
+			{
+				IndexName: "status_index",
+				SortKey:   "status",
+			},
 		},
 	})
 
@@ -97,5 +103,17 @@ func main() {
 		},
 		ProjectionExpression: "user_id,order_id,amount,status",
 		ScanIndexForward:     false,
+	})
+
+	ddb.Query(dynamo.QueryInput{
+		TableName:              "orders",
+		KeyConditionExpression: "user_id = ? AND status = ?",
+		KeyValues: map[string]string{
+			"user_id": "user#1",
+			"status":  "completed",
+		},
+		ProjectionExpression: "user_id,order_id,amount,status",
+		ScanIndexForward:     true,
+		IndexName:            "status_index",
 	})
 }
