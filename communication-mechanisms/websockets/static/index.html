@@ -1,43 +1,248 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
-  <title>Socket.IO Echo Demo</title>
-  <script src="https://unpkg.com/socket.io-client@2.4.0/dist/socket.io.js"></script>
-</head>
-<body>
-  <h1>Socket.IO Echo Demo</h1>
-  <input id="msg" type="text" placeholder="Type a message">
-  <button id="sendBtn">Send</button>
-  <pre id="output"></pre>
-  <script>
-    document.addEventListener('DOMContentLoaded', function () {
-      var socket = io({ path: '/socket.io' });
-
-      socket.on("connect", function () {
-        console.log("connected", socket.id);
-        document.getElementById("output").textContent += "Connected\n";
-      });
-
-      socket.on("error", function (err) {
-        console.error("socket error:", err);
-      });
-
-      socket.on("echo", function (msg) {
-        document.getElementById("output").textContent += "Echo: " + msg + "\n";
-      });
-
-      function sendMsg() {
-        var msg = document.getElementById("msg").value;
-        if (!socket || socket.disconnected) {
-          console.warn("socket not ready");
-          return;
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Go Socket.IO Chat</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap" rel="stylesheet">
+    <style>
+        body { font-family: 'Inter', sans-serif; background-color: #f3f4f6; }
+        #messages {
+            height: 300px;
+            overflow-y: auto;
+            border-radius: 0.5rem;
+            padding: 0.75rem;
+            background-color: #ffffff;
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -2px rgba(0, 0, 0, 0.1);
         }
-        console.log("emit echo:", msg);
-        socket.emit("echo", msg);
-      }
+        .message-in { text-align: left; }
+        .message-out { text-align: right; }
+    </style>
+</head>
+<body class="min-h-screen flex items-center justify-center p-4">
 
-      document.getElementById("sendBtn").addEventListener("click", sendMsg);
-    });
-  </script>
+    <div id="app" class="w-full max-w-md bg-white p-6 rounded-xl shadow-2xl">
+        <h1 class="text-3xl font-bold text-center text-gray-800 mb-6">Go Chat</h1>
+
+        <div id="username-modal" class="fixed inset-0 bg-gray-600 bg-opacity-75 flex items-center justify-center z-50">
+            <div class="bg-white p-8 rounded-lg shadow-xl w-80">
+                <h2 class="text-xl font-semibold mb-4 text-gray-800">Choose a Username</h2>
+                <input type="text" id="username-input" placeholder="Your Name" 
+                       class="w-full p-3 border border-gray-300 rounded-lg focus:ring-blue-500 focus:border-blue-500 mb-4">
+                <button id="set-username-btn" 
+                        class="w-full bg-blue-600 text-white p-3 rounded-lg font-semibold hover:bg-blue-700 transition duration-150 shadow-md">
+                    Start Chatting
+                </button>
+            </div>
+        </div>
+        
+        <div id="chat-interface" class="hidden">
+            <div id="messages" class="mb-4 space-y-3">
+                <div class="text-center text-gray-500 text-sm italic" id="status-message">Ready to connect...</div>
+            </div>
+
+            <p class="text-sm font-medium text-gray-600 mb-2">Logged in as: <span id="current-username" class="font-bold text-blue-600"></span></p>
+
+            <form id="form" class="flex gap-2">
+                <input type="text" id="input" autocomplete="off" placeholder="Type your message..."
+                       class="flex-grow p-3 border border-gray-300 rounded-lg focus:ring-green-500 focus:border-green-500">
+                <button type="submit" 
+                        class="bg-green-600 text-white p-3 rounded-lg font-semibold hover:bg-green-700 transition duration-150 shadow-md">
+                    Send
+                </button>
+            </form>
+            
+            <div class="mt-4 p-3 bg-gray-100 rounded text-xs overflow-auto max-h-32">
+                <strong>Debug Log:</strong>
+                <div id="debug-info" class="mt-1 text-gray-700 font-mono"></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Try multiple CDN sources for Socket.IO -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/2.3.0/socket.io.js"></script>
+    
+    <script>
+        // Wait for DOM to be fully loaded
+        document.addEventListener('DOMContentLoaded', function() {
+            let username = '';
+            let socket;
+
+            const usernameModal = document.getElementById('username-modal');
+            const usernameInput = document.getElementById('username-input');
+            const setUsernameBtn = document.getElementById('set-username-btn');
+            const chatInterface = document.getElementById('chat-interface');
+            const currentUsernameSpan = document.getElementById('current-username');
+            const form = document.getElementById('form');
+            const input = document.getElementById('input');
+            const messages = document.getElementById('messages');
+            const statusMessage = document.getElementById('status-message');
+            const debugInfo = document.getElementById('debug-info');
+
+            function updateDebug(msg) {
+                const timestamp = new Date().toLocaleTimeString();
+                const entry = `[${timestamp}] ${msg}`;
+                debugInfo.innerHTML = entry + '<br>' + debugInfo.innerHTML;
+                console.log(entry);
+            }
+
+            // Check if Socket.IO loaded
+            if (typeof io === 'undefined') {
+                alert('Socket.IO failed to load. Using fallback...');
+                // Try loading from alternative CDN
+                const script = document.createElement('script');
+                script.src = 'https://cdn.socket.io/4.5.4/socket.io.min.js';
+                script.onload = function() {
+                    updateDebug('✅ Socket.IO loaded from fallback CDN');
+                };
+                script.onerror = function() {
+                    alert('Failed to load Socket.IO from all CDN sources. Please check your internet connection.');
+                };
+                document.head.appendChild(script);
+            } else {
+                updateDebug('✅ Socket.IO library loaded successfully');
+            }
+
+            usernameInput.addEventListener('keypress', (e) => {
+                if (e.key === 'Enter') {
+                    setUsernameBtn.click();
+                }
+            });
+
+            setUsernameBtn.addEventListener('click', () => {
+                const name = usernameInput.value.trim();
+                if (name) {
+                    username = name;
+                    currentUsernameSpan.textContent = username;
+                    usernameModal.classList.add('hidden');
+                    chatInterface.classList.remove('hidden');
+                    
+                    // Small delay to ensure DOM is ready
+                    setTimeout(() => {
+                        initializeSocket();
+                    }, 100);
+                } else {
+                    alert('Please enter a username');
+                }
+            });
+
+            function initializeSocket() {
+                if (typeof io === 'undefined') {
+                    updateDebug('❌ ERROR: Socket.IO library not loaded!');
+                    statusMessage.textContent = '✗ Socket.IO library missing';
+                    statusMessage.classList.add('text-red-500');
+                    return;
+                }
+
+                updateDebug('🔌 Socket.IO version: ' + (io.version || io.protocol || 'v2.x'));
+                updateDebug('🔌 Connecting to http://localhost:8080...');
+                statusMessage.textContent = 'Connecting to server...';
+                
+                try {
+                    socket = io('http://localhost:8080', {
+                        path: '/socket.io/',
+                        transports: ['polling', 'websocket'],
+                        upgrade: true,
+                        rememberUpgrade: true,
+                        reconnection: true,
+                        reconnectionDelay: 1000,
+                        reconnectionDelayMax: 5000,
+                        reconnectionAttempts: 10,
+                        timeout: 20000,
+                        autoConnect: true
+                    });
+
+                    socket.on('connect', () => {
+                        updateDebug('✅ Connected! Socket ID: ' + socket.id);
+                        try {
+                            const transport = socket.io && socket.io.engine ? socket.io.engine.transport.name : 'unknown';
+                            updateDebug('📡 Transport: ' + transport);
+                        } catch(e) {
+                            updateDebug('📡 Transport: polling/websocket');
+                        }
+                        statusMessage.textContent = '✓ Connected. Start chatting!';
+                        statusMessage.className = 'text-center text-green-500 text-sm italic';
+                    });
+
+                    socket.on('connect_error', (error) => {
+                        updateDebug('❌ Connection error: ' + (error.message || error));
+                        statusMessage.textContent = '✗ Connection failed';
+                        statusMessage.className = 'text-center text-red-500 text-sm italic';
+                    });
+
+                    socket.on('disconnect', (reason) => {
+                        updateDebug('🔌 Disconnected: ' + reason);
+                        statusMessage.textContent = 'Disconnected: ' + reason;
+                        statusMessage.className = 'text-center text-red-500 text-sm italic';
+                    });
+
+                    socket.on('reconnect', (attemptNumber) => {
+                        updateDebug('✅ Reconnected after ' + attemptNumber + ' attempts');
+                        statusMessage.className = 'text-center text-green-500 text-sm italic';
+                    });
+
+                    socket.on('message', (msg) => {
+                        updateDebug('📨 Message from ' + msg.username);
+                        appendMessage(msg.username, msg.message);
+                    });
+
+                    // Log transport upgrade
+                    try {
+                        if (socket.io && socket.io.engine) {
+                            socket.io.engine.on('upgrade', (transport) => {
+                                updateDebug('⬆️ Upgraded to: ' + transport.name);
+                            });
+                        }
+                    } catch(e) {
+                        // Ignore if engine events not available
+                    }
+                } catch (error) {
+                    updateDebug('❌ Failed to initialize socket: ' + error.message);
+                    statusMessage.textContent = '✗ Initialization failed';
+                    statusMessage.className = 'text-center text-red-500 text-sm italic';
+                }
+            }
+
+            form.addEventListener('submit', function(e) {
+                e.preventDefault();
+                const messageText = input.value.trim();
+                
+                if (!messageText) return;
+
+                if (socket && socket.connected) {
+                    updateDebug('📤 Sending: ' + messageText);
+                    socket.emit('message', {
+                        username: username,
+                        message: messageText
+                    });
+                    input.value = '';
+                } else {
+                    updateDebug('⚠️ Not connected!');
+                    alert('Not connected. Please wait...');
+                }
+            });
+
+            function appendMessage(sender, text) {
+                const isSelf = sender === username;
+                const item = document.createElement('div');
+                item.className = isSelf ? 'message-out' : 'message-in';
+                
+                const time = new Date().toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
+                
+                item.innerHTML = `
+                    <div class="mb-1">
+                        <span class="text-xs ${isSelf ? 'text-gray-500' : 'text-blue-500'} font-semibold">${sender}</span>
+                        <span class="text-xs text-gray-400 ml-1">${time}</span>
+                    </div>
+                    <div class="p-2 max-w-xs inline-block rounded-lg shadow-sm ${isSelf ? 'bg-green-100 text-gray-800' : 'bg-gray-100 text-gray-800'}">
+                        ${text}
+                    </div>
+                `;
+                messages.appendChild(item);
+                messages.scrollTop = messages.scrollHeight;
+            }
+        });
+    </script>
 </body>
 </html>
