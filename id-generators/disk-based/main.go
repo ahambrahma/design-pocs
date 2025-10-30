@@ -14,6 +14,7 @@ var mu sync.Mutex
 var counter int64
 
 const counterFilePath = "counter_value.txt"
+const iterations = 50
 
 func loadCounter() {
 	mu.Lock()
@@ -22,26 +23,26 @@ func loadCounter() {
 	data, err := os.ReadFile(counterFilePath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			counter = 0
+			counter = iterations
 			os.Create(counterFilePath)
-			persistCounter(counterFilePath, 0)
+			persistCounter(counterFilePath, counter)
 
 			log.Printf("Counter file not found. Starting counter at 0")
 			return
 		}
 		log.Fatalf("Error reading counter file: %v. Considering counter as 0", err)
-		counter = 0
+		counter = iterations
 		return
 	}
 
 	val, err := strconv.ParseInt(string(data), 10, 64)
 	if err != nil {
 		log.Fatalf("Error reading counter data: %v. Considering counter as 0", err)
-		counter = 0
+		counter = iterations
 		return
 	}
 
-	counter = val
+	counter = val + iterations
 	log.Printf("Counter successfully loaded from disk: %d\n", counter)
 }
 
@@ -88,7 +89,7 @@ func handler(w http.ResponseWriter, r *http.Request) {
 func periodicHandler(w http.ResponseWriter, r *http.Request) {
 	fmt.Println("Entered periodic handler")
 
-	newID, err := generateIDWithPeriodicDiskPersistence(50)
+	newID, err := generateIDWithPeriodicDiskPersistence(iterations)
 	if err == nil {
 		fmt.Fprintf(w, "Generated ID: %d\n", newID)
 		fmt.Printf("Generated ID: %d\n", newID)
@@ -103,7 +104,6 @@ func generateIDWithPeriodicDiskPersistence(iterations int64) (int64, error) {
 	counter++
 	value := counter
 	if value%iterations == 0 {
-		fmt.Println("Entered block")
 		if err := persistCounter(counterFilePath, value); err != nil {
 			log.Fatalf("FATAL: Failed to persist counter value %d to disk: %v", value, err)
 			return value, errors.New("Failed to persist counter to disk")
