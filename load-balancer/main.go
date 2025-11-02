@@ -8,13 +8,6 @@ import (
 	"time"
 )
 
-type BackendServerProperties struct {
-	IP              string
-	BaseUrl         string
-	APIPort         uint
-	HealthCheckPort uint
-}
-
 type LoadBalancingConfig struct {
 	Servers   []*BackendServerProperties
 	Algorithm LoadBalancingAlgorithm // TODO: Replace with a factory pattern
@@ -51,7 +44,7 @@ func (lb *LoadBalancer) requestHandler(w http.ResponseWriter, r *http.Request) {
 
 func (lb *LoadBalancer) forwardRequest(w http.ResponseWriter, r *http.Request, server *BackendServerProperties) {
 	// 1. Construct the backend URL
-	backendURL := fmt.Sprintf("%s:%d%s", server.BaseUrl, server.APIPort, r.URL.Path)
+	backendURL := fmt.Sprintf("%s:%d%s", server.GetUrl(), server.GetAPIPort(), r.URL.Path)
 
 	// Add query parameters if they exist
 	if r.URL.RawQuery != "" {
@@ -90,6 +83,8 @@ func (lb *LoadBalancer) forwardRequest(w http.ResponseWriter, r *http.Request, s
 		Timeout: 30 * time.Second, // Set a reasonable timeout
 	}
 
+	server.IncrementConnections()
+
 	backendResp, err := client.Do(backendReq)
 	if err != nil {
 		fmt.Println("Error calling backend:", err)
@@ -97,6 +92,7 @@ func (lb *LoadBalancer) forwardRequest(w http.ResponseWriter, r *http.Request, s
 		w.Write([]byte("Backend server unavailable"))
 		return
 	}
+	defer server.DecrementConnections()
 	defer backendResp.Body.Close()
 
 	// 6. Copy response headers from backend to client
@@ -144,30 +140,14 @@ type LoadBalancingAlgorithm interface {
 func main() {
 	// Define backend servers
 	servers := []*BackendServerProperties{
-		{
-			IP:              "127.0.0.1",
-			BaseUrl:         "http://localhost",
-			APIPort:         9001,
-			HealthCheckPort: 9001,
-		},
-		{
-			IP:              "127.0.0.1",
-			BaseUrl:         "http://localhost",
-			APIPort:         9002,
-			HealthCheckPort: 9002,
-		},
-		{
-			IP:              "127.0.0.1",
-			BaseUrl:         "http://localhost",
-			APIPort:         9003,
-			HealthCheckPort: 9003,
-		},
+		NewBackendServer("1", "http://localhost", 9001, 9001),
+		NewBackendServer("2", "http://localhost", 9002, 9002),
+		NewBackendServer("3", "http://localhost", 9003, 9003),
 	}
 
 	// Create round-robin algorithm instance
-	algorithm := &RoundRobinLoadBalancingAlgorithm{
-		counter: 0,
-	}
+	weightsMap := map[string]int{"1": 50, "2": 25, "3": 25}
+	algorithm, _ := NewClassicWeightedRoundRobin(weightsMap)
 
 	// Configure the load balancer
 	config := LoadBalancingConfig{
