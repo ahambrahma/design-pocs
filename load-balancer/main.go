@@ -147,7 +147,7 @@ func main() {
 
 	// Create round-robin algorithm instance
 	weightsMap := map[string]int{"1": 50, "2": 25, "3": 25}
-	algorithm, _ := NewClassicWeightedRoundRobin(weightsMap)
+	algorithm, _ := NewSmoothWeightRoundRobin(weightsMap)
 
 	// Configure the load balancer
 	config := LoadBalancingConfig{

@@ -14,6 +14,16 @@ type ClassicWeightedRoundRobin struct {
 	keys          []string       // Since maps iterations are not definitive in nature, hence we need to convert them to keys and then sort
 }
 
+/*
+**
+
+Classic weighted round robin algorithm allocates the requests in the order of the weight i.e if we have 3 servers having weights
+50, 25 and 25 respectively - then the first 50 requests would be handled by A, the next 25 by B and the rest by C and then the cycle repeats.
+
+As clear from the above explaination, this approach can lead to unexpected spikes on a single instance.
+Hence, there is another algorithm which smooths out the overall traffic.
+*
+*/
 func NewClassicWeightedRoundRobin(serverWeights map[string]int) (*ClassicWeightedRoundRobin, error) {
 	if len(serverWeights) == 0 {
 		return nil, errors.New("provided empty server weights")
@@ -50,7 +60,7 @@ func (w *ClassicWeightedRoundRobin) getNext(lb *LoadBalancer) (*BackendServerPro
 
 	// Figure out which URL to send the request to
 	w.mtx.Lock()
-	defer w.mtx.Unlock()
+
 	w.requestCount = ((w.requestCount % 100) + 1)
 
 	weightSum := 0
@@ -71,6 +81,8 @@ func (w *ClassicWeightedRoundRobin) getNext(lb *LoadBalancer) (*BackendServerPro
 			break
 		}
 	}
+
+	w.mtx.Unlock()
 
 	// Figure out the backend server properties object
 	for _, server := range lb.Config.Servers {
