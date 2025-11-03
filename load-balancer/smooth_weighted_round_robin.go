@@ -52,7 +52,7 @@ In this case, A will get the request.
 
 
 Considering this algorithm is able to direct the traffic in the order of weights while at the same time prevent overloading the
-server, it is more preferred in production systems by the load balancers.
+server, it is more preferred in production systems by the load balancers
 
 **/
 
