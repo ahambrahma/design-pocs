@@ -138,6 +138,7 @@ func (w *WordDictionary) Import(changeLogFilePath string) error {
 		if _, err = changeLogFile.ReadAt(chLenBytes, changeLogFileOffset); err != nil {
 			return fmt.Errorf("reading change log length bytes: %w", err)
 		}
+
 		chWordLen := int(chLenBytes[0])
 		chMeaningLen := int(chLenBytes[1])<<16 | int(chLenBytes[2])<<8 | int(chLenBytes[3])
 		chEntrySize := 4 + chWordLen + chMeaningLen
@@ -206,56 +207,81 @@ func (w *WordDictionary) Import(changeLogFilePath string) error {
 
 	// Append remaining entries from current file
 	for currentFileOffset < w.currentOffset {
-		remainingSize := w.currentOffset - currentFileOffset
-		buf := make([]byte, remainingSize)
+		// Read length prefix of 4 bytes for one entry
+		lenBytes := make([]byte, 4)
+		if _, err := file.ReadAt(lenBytes, currentFileOffset); err != nil {
+			return fmt.Errorf("reading current file length bytes: %w", err)
+		}
+		wordLen := int(lenBytes[0])
+		meaningLen := int(lenBytes[1])<<16 | int(lenBytes[2])<<8 | int(lenBytes[3])
+		entrySize := 4 + wordLen + meaningLen
+
+		// Read entire entry bytes
+		buf := make([]byte, entrySize)
 		if _, err := file.ReadAt(buf, currentFileOffset); err != nil {
-			return fmt.Errorf("reading remaining current file: %w", err)
+			return fmt.Errorf("reading current file entry bytes: %w", err)
 		}
-		n, err := tempFile.Write(buf)
-		if err != nil {
-			return fmt.Errorf("writing remaining current file: %w", err)
-		}
-		if int64(n) != remainingSize {
-			return fmt.Errorf("incomplete write of remaining current file")
-		}
-		// parse word for map
-		wordLen := int(buf[0])
+
 		wordBytes := buf[4 : 4+wordLen]
 		word := string(wordBytes)
 
+		// Write entry to temp file
+		n, err := tempFile.Write(buf)
+		if err != nil {
+			return fmt.Errorf("writing current file entry to temp file: %w", err)
+		}
+		if n != entrySize {
+			return fmt.Errorf("incomplete write of current file entry")
+		}
+
+		// Update meta map
 		tempMetaMap[word] = DictionaryEntryMeta{
 			offset:    tempFileOffset,
-			entrySize: int(remainingSize),
+			entrySize: entrySize,
 		}
-		tempFileOffset += remainingSize
-		currentFileOffset = w.currentOffset // done
+
+		tempFileOffset += int64(entrySize)
+		currentFileOffset += int64(entrySize)
 	}
 
 	// Append remaining entries from change log file
 	for changeLogFileOffset < info.Size() {
-		remainingSize := info.Size() - changeLogFileOffset
-		buf := make([]byte, remainingSize)
+		// Read length prefix for one entry (4 bytes)
+		lenBytes := make([]byte, 4)
+		if _, err := changeLogFile.ReadAt(lenBytes, changeLogFileOffset); err != nil {
+			return fmt.Errorf("reading length bytes: %w", err)
+		}
+
+		wordLen := int(lenBytes[0])
+		meaningLen := int(lenBytes[1])<<16 | int(lenBytes[2])<<8 | int(lenBytes[3])
+		entrySize := 4 + wordLen + meaningLen
+
+		buf := make([]byte, entrySize)
 		if _, err := changeLogFile.ReadAt(buf, changeLogFileOffset); err != nil {
-			return fmt.Errorf("reading remaining change log: %w", err)
+			return fmt.Errorf("reading entry bytes: %w", err)
 		}
-		n, err := tempFile.Write(buf)
-		if err != nil {
-			return fmt.Errorf("writing remaining change log: %w", err)
-		}
-		if int64(n) != remainingSize {
-			return fmt.Errorf("incomplete write of remaining change log")
-		}
-		// parse word for map
-		wordLen := int(buf[0])
+
 		wordBytes := buf[4 : 4+wordLen]
 		word := string(wordBytes)
 
+		// Update the meta map
 		tempMetaMap[word] = DictionaryEntryMeta{
 			offset:    tempFileOffset,
-			entrySize: int(remainingSize),
+			entrySize: entrySize,
 		}
-		tempFileOffset += remainingSize
-		changeLogFileOffset = info.Size() // done
+
+		// Write this entry to the temp file
+		n, err := tempFile.Write(buf)
+		if err != nil {
+			return fmt.Errorf("writing temp file: %w", err)
+		}
+		if n != entrySize {
+			return fmt.Errorf("incomplete write to temp file")
+		}
+
+		// Advance offsets
+		tempFileOffset += int64(entrySize)
+		changeLogFileOffset += int64(entrySize)
 	}
 
 	tempFile.Sync()
