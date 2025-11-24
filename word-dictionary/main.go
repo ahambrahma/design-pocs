@@ -324,7 +324,7 @@ func main() {
 	dict.Insert("Ball", "A Ball")
 	dict.Insert("Cat", "A Cat")
 
-	dict.Import("./word_dictionary_1")
+	dict.Import("./change_log")
 
 	file.Sync()
 	file.Close()
