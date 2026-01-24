@@ -1,11 +1,13 @@
 package main
 
 import (
-	"crypto/sha256"
 	"fmt"
-	"math/big"
+	"hash/crc64"
 	"sort"
+	"sync"
 )
+
+const VirtualNodes = 100
 
 type StorageNode struct {
 	name string
@@ -13,57 +15,79 @@ type StorageNode struct {
 }
 
 type ConsistentHashingRing struct {
-	ringSize *big.Int
-	nodes    []*big.Int
-	nodeMap  map[string]*StorageNode
+	nodes   []uint64                // Simple, contiguous memory
+	nodeMap map[uint64]*StorageNode // Fast integer lookups
+	mu      sync.RWMutex
 }
 
 func NewConsistentHashingRing() *ConsistentHashingRing {
 	return &ConsistentHashingRing{
-		ringSize: new(big.Int).Exp(big.NewInt(2), big.NewInt(256), nil),
-		nodes:    make([]*big.Int, 0),
-		nodeMap:  make(map[string]*StorageNode),
+		nodes:   make([]uint64, 0),
+		nodeMap: make(map[uint64]*StorageNode),
 	}
 }
 
-func (c *ConsistentHashingRing) computeHash(key string) *big.Int {
-	hash := sha256.Sum256([]byte(key))
-	return new(big.Int).SetBytes(hash[:])
+func (c *ConsistentHashingRing) computeHash(key string) uint64 {
+	// fast, non-cryptographic hash
+	return crc64.Checksum([]byte(key), crc64.MakeTable(crc64.ISO))
 }
 
 func (c *ConsistentHashingRing) addNode(node *StorageNode) {
-	slot := c.computeHash(node.host)
+	c.mu.Lock()         // Write Lock
+	defer c.mu.Unlock() // Ensure unlock happens even if we panic
 
-	c.nodes = append(c.nodes, slot)
-	c.nodeMap[slot.String()] = node
+	// Add support for virtual nodes, 10 per node
+	for i := 0; i < VirtualNodes; i++ {
+		virtualNodeKey := fmt.Sprintf("%s#%d", node.host, i)
+		slot := c.computeHash(virtualNodeKey)
+		c.nodes = append(c.nodes, slot)
+		c.nodeMap[slot] = node
+	}
 
 	// Keep nodes sorted for efficient clockwise lookup
 	sort.Slice(c.nodes, func(i, j int) bool {
-		return c.nodes[i].Cmp(c.nodes[j]) < 0
+		return c.nodes[i] < c.nodes[j]
 	})
 }
 
 func (c *ConsistentHashingRing) deleteNode(node *StorageNode) {
-	hash := c.computeHash(node.host)
-	hashStr := hash.String()
+	c.mu.Lock()         // Write Lock
+	defer c.mu.Unlock() // Ensure unlock happens even if we panic
 
-	delete(c.nodeMap, hashStr)
-	for i, nodeHash := range c.nodes {
-		if nodeHash.Cmp(hash) == 0 {
-			c.nodes = append(c.nodes[:i], c.nodes[i+1:]...)
-			break
+	// Remove all virtual nodes
+	for i := 0; i < VirtualNodes; i++ {
+		virtualNodeKey := fmt.Sprintf("%s#%d", node.host, i)
+		hash := c.computeHash(virtualNodeKey)
+
+		delete(c.nodeMap, hash)
+	}
+
+	newNodes := make([]uint64, 0, len(c.nodes)-VirtualNodes)
+
+	for _, hash := range c.nodes {
+		if _, exists := c.nodeMap[hash]; exists {
+			newNodes = append(newNodes, hash)
 		}
 	}
+
+	c.nodes = newNodes
 }
 
 func (c *ConsistentHashingRing) getNode(key string) *StorageNode {
+	c.mu.RLock() // Read Lock
+	defer c.mu.RUnlock()
+
+	if len(c.nodes) == 0 {
+		return nil
+	}
+
 	hash := c.computeHash(key)
 
-	fmt.Printf("Hash for key: %s: %s, length: %d\n", key, hash.String(), len(hash.String()))
+	fmt.Printf("Hash for key: %s: %d\n", key, hash)
 
 	// Binary search for first node >= hash (clockwise search)
 	idx := sort.Search(len(c.nodes), func(i int) bool {
-		return c.nodes[i].Cmp(hash) >= 0
+		return c.nodes[i] >= hash
 	})
 
 	fmt.Println("idx: ", idx)
@@ -72,7 +96,7 @@ func (c *ConsistentHashingRing) getNode(key string) *StorageNode {
 		idx = 0
 	}
 
-	return c.nodeMap[c.nodes[idx].String()]
+	return c.nodeMap[c.nodes[idx]]
 }
 
 func newStorageNode(name, host string) *StorageNode {
@@ -91,22 +115,24 @@ func main() {
 
 	fmt.Println("Nodes distribution:")
 	for idx, hash := range ch.nodes {
-		fmt.Printf("node[%d] - %d, length: %d\n", idx, hash, len(hash.String()))
+		fmt.Printf("node[%d] - %d\n", idx, hash)
 	}
 
 	fmt.Println()
 
 	// Test key distribution
-	keys := []string{"user:1", "user:2", "user:3", "user:4", "user:5", "user:6", "user:7"}
+	keys := []string{"user:1", "user:101", "user:1028", "user:17917", "user:2917191", "user:18191910", "user:176181618"}
 	for _, key := range keys {
 		targetNode := ch.getNode(key)
 		fmt.Printf("Key '%s' maps to node: %s\n", key, targetNode.name)
 	}
 
-	ch.deleteNode(ch.nodeMap[ch.nodes[0].String()])
+	nodeToBeDeleted := ch.nodeMap[ch.nodes[0]]
+	fmt.Printf("Node to be deleted: %s\n", nodeToBeDeleted.name)
+	ch.deleteNode(nodeToBeDeleted)
 
+	fmt.Println("Mappings after deletion of node")
 	fmt.Println()
-	fmt.Println("After deleting A")
 	fmt.Println()
 
 	for _, key := range keys {
