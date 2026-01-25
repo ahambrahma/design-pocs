@@ -2,5 +2,8 @@ package main
 
 func main() {
 	//Listen()
-	ListenMultiThreaded()
+	// ListenMultiThreaded()
+	if err := ListeningForConnections(); err != nil {
+		panic(err)
+	}
 }
