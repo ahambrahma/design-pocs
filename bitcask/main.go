@@ -139,10 +139,6 @@ func (b *BitCask) Get(key []byte) ([]byte, error) {
 	return buf[headerSize+keyLen:], nil
 }
 
-func (b *BitCask) Merge() error {
-
-}
-
 func New() *BitCask {
 	return &BitCask{
 		fileBasePath:     "./",
