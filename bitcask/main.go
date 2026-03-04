@@ -29,6 +29,13 @@ type BitCask struct {
 	mergeFileOffset  int64
 }
 
+type mergeUpdate struct {
+	originalFilePath string
+	originalOffset   int64
+	originalValSize  uint32
+	newEntry         KeyDirEntry
+}
+
 const headerSize = 17 // crc(4) + tstamp(4) + ksz(4) + vsz(4) + flag(1)
 
 func (b *BitCask) put(key, value []byte, flag byte) error {
@@ -173,8 +180,7 @@ func (b *BitCask) Merge() {
 		}
 		curOffset := int64(0)
 		fileMergedSuccessfully := true
-		// Batch of KeyDir updates to apply after scanning the file
-		pendingUpdates := make(map[string]KeyDirEntry)
+		pendingUpdates := make(map[string]mergeUpdate)
 		for {
 			_, err := filePtr.ReadAt(buf, curOffset)
 			if err == io.EOF {
@@ -199,6 +205,15 @@ func (b *BitCask) Merge() {
 					break
 				}
 
+				// CRC verification
+				storedCRC := binary.LittleEndian.Uint32(buf1[0:4])
+				computedCRC := crc32.ChecksumIEEE(buf1[4:])
+				if storedCRC != computedCRC {
+					fmt.Printf("Corrupted entry at offset %d in %s, skipping\n", curOffset, filePath)
+					curOffset += blockSize
+					continue
+				}
+
 				key := buf1[17 : 17+keySize]
 				keyStr := string(key)
 
@@ -210,7 +225,6 @@ func (b *BitCask) Merge() {
 					offset := keyDirEntry.fileEntryOffset
 					valSize := keyDirEntry.valueSize
 					if path == filePath && offset == curOffset && valSize == valueSize {
-						// merge candidate
 						_, err := mergeFilePtr.WriteAt(buf1, b.mergeFileOffset)
 						if err != nil {
 							fmt.Printf("Error occurred while writing entry: %v\n", err)
@@ -218,10 +232,15 @@ func (b *BitCask) Merge() {
 							break
 						}
 						fmt.Printf("Updating the entry for key: %s\n", keyStr)
-						pendingUpdates[keyStr] = KeyDirEntry{
-							filePath:        mergeFilePath,
-							fileEntryOffset: b.mergeFileOffset,
-							valueSize:       valSize,
+						pendingUpdates[keyStr] = mergeUpdate{
+							originalFilePath: filePath,
+							originalOffset:   curOffset,
+							originalValSize:  valueSize,
+							newEntry: KeyDirEntry{
+								filePath:        mergeFilePath,
+								fileEntryOffset: b.mergeFileOffset,
+								valueSize:       valSize,
+							},
 						}
 						b.mergeFileOffset += blockSize
 					}
@@ -231,11 +250,15 @@ func (b *BitCask) Merge() {
 			curOffset += blockSize
 		}
 
-		// Apply all KeyDir updates and cleanup in a single lock acquisition
 		b.mtx.Lock()
 
-		for keyStr, entry := range pendingUpdates {
-			b.keyDir[keyStr] = entry
+		for keyStr, update := range pendingUpdates {
+			current, ok := b.keyDir[keyStr]
+			if ok && current.filePath == update.originalFilePath &&
+				current.fileEntryOffset == update.originalOffset &&
+				current.valueSize == update.originalValSize {
+				b.keyDir[keyStr] = update.newEntry
+			}
 		}
 
 		if !fileMergedSuccessfully {
