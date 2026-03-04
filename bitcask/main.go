@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"hash/crc32"
+	"io"
 	"os"
 	"sync"
 	"time"
@@ -25,6 +26,7 @@ type BitCask struct {
 	fileCnt          int
 	maxFileSizeBytes int64
 	mergeFileCnt     int
+	mergeFileOffset  int64
 }
 
 const headerSize = 17 // crc(4) + tstamp(4) + ksz(4) + vsz(4) + flag(1)
@@ -139,10 +141,138 @@ func (b *BitCask) Get(key []byte) ([]byte, error) {
 	return buf[headerSize+keyLen:], nil
 }
 
+func (b *BitCask) Merge() {
+
+	b.mtx.Lock()
+	activeFilePath := fmt.Sprintf("%s%d.data", b.fileBasePath, b.fileCnt)
+	mergeFilePath := fmt.Sprintf("%smerge-%d.data", b.fileBasePath, b.mergeFileCnt)
+	mergeFilePtr, err := os.OpenFile(mergeFilePath, os.O_CREATE|os.O_RDWR, 0644)
+	if err != nil {
+		fmt.Println("Error occurred while creating filePtr:", err)
+		b.mtx.Unlock()
+		return
+	}
+	b.filePtrs[mergeFilePath] = mergeFilePtr
+
+	// Snapshot all immutable file paths (everything except active and current merge file)
+	var immutableFiles []string
+	for path := range b.filePtrs {
+		if path != activeFilePath && path != mergeFilePath {
+			immutableFiles = append(immutableFiles, path)
+		}
+	}
+	b.mtx.Unlock()
+
+	for _, filePath := range immutableFiles {
+		buf := make([]byte, 17)
+		b.mtx.RLock()
+		filePtr, exists := b.filePtrs[filePath]
+		b.mtx.RUnlock()
+		if !exists {
+			continue
+		}
+		curOffset := int64(0)
+		fileMergedSuccessfully := true
+		// Batch of KeyDir updates to apply after scanning the file
+		pendingUpdates := make(map[string]KeyDirEntry)
+		for {
+			_, err := filePtr.ReadAt(buf, curOffset)
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				fmt.Printf("Error occurred while reading header: %v\n", err)
+				fileMergedSuccessfully = false
+				break
+			}
+			keySize := binary.LittleEndian.Uint32(buf[8:12])
+			valueSize := binary.LittleEndian.Uint32(buf[12:16])
+			isDeleted := buf[16]
+
+			blockSize := int64(17 + keySize + valueSize)
+			if isDeleted == 0 {
+				buf1 := make([]byte, blockSize)
+				_, err = filePtr.ReadAt(buf1, curOffset)
+				if err != nil {
+					fmt.Printf("Error occurred while reading entry: %v\n", err)
+					fileMergedSuccessfully = false
+					break
+				}
+
+				key := buf1[17 : 17+keySize]
+				keyStr := string(key)
+
+				b.mtx.RLock()
+				keyDirEntry, ok := b.keyDir[keyStr]
+				b.mtx.RUnlock()
+				if ok {
+					path := keyDirEntry.filePath
+					offset := keyDirEntry.fileEntryOffset
+					valSize := keyDirEntry.valueSize
+					if path == filePath && offset == curOffset && valSize == valueSize {
+						// merge candidate
+						_, err := mergeFilePtr.WriteAt(buf1, b.mergeFileOffset)
+						if err != nil {
+							fmt.Printf("Error occurred while writing entry: %v\n", err)
+							fileMergedSuccessfully = false
+							break
+						}
+						fmt.Printf("Updating the entry for key: %s\n", keyStr)
+						pendingUpdates[keyStr] = KeyDirEntry{
+							filePath:        mergeFilePath,
+							fileEntryOffset: b.mergeFileOffset,
+							valueSize:       valSize,
+						}
+						b.mergeFileOffset += blockSize
+					}
+				}
+			}
+
+			curOffset += blockSize
+		}
+
+		// Apply all KeyDir updates and cleanup in a single lock acquisition
+		b.mtx.Lock()
+
+		for keyStr, entry := range pendingUpdates {
+			b.keyDir[keyStr] = entry
+		}
+
+		if !fileMergedSuccessfully {
+			fmt.Printf("Skipping cleanup of %s due to merge errors\n", filePath)
+			b.mtx.Unlock()
+			continue
+		}
+
+		filePtr.Close()
+		delete(b.filePtrs, filePath)
+		os.Remove(filePath)
+
+		if b.mergeFileOffset >= b.maxFileSizeBytes {
+			fmt.Printf("Creating new file counter for merge files when offset is %d\n", b.mergeFileOffset)
+			b.mergeFileCnt++
+			b.mergeFileOffset = 0
+
+			mergeFilePath = fmt.Sprintf("%smerge-%d.data", b.fileBasePath, b.mergeFileCnt)
+			mergeFilePtr, err = os.OpenFile(mergeFilePath, os.O_CREATE|os.O_RDWR, 0644)
+			if err != nil {
+				fmt.Println("Error occurred while creating filePtr:", err)
+				b.mtx.Unlock()
+				return
+			}
+			b.filePtrs[mergeFilePath] = mergeFilePtr
+		}
+
+		b.mtx.Unlock()
+	}
+
+}
+
 func New() *BitCask {
 	return &BitCask{
 		fileBasePath:     "./",
 		fileCnt:          1,
+		mergeFileCnt:     1,
 		keyDir:           make(map[string]KeyDirEntry),
 		currOffset:       0,
 		maxFileSizeBytes: 65536,
@@ -157,7 +287,7 @@ func main() {
 	// // bitCask.Delete([]byte("Hello"))
 	// bitCask.Get([]byte("Hello"))
 
-	for i := range 5000 {
+	for i := range 10000 {
 		str := fmt.Sprint(i)
 		bitCask.Put([]byte(str), []byte(str))
 		val, _ := bitCask.Get([]byte(str))
@@ -165,5 +295,8 @@ func main() {
 			fmt.Println("Bug detected")
 		}
 	}
+
+	bitCask.Merge()
+	bitCask.Merge()
 
 }
