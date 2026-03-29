@@ -7,6 +7,7 @@ import (
 	"hash/crc32"
 	"io"
 	"os"
+	"strings"
 	"sync"
 	"time"
 )
@@ -18,15 +19,16 @@ type KeyDirEntry struct {
 }
 
 type BitCask struct {
-	fileBasePath     string
-	currOffset       int64
-	filePtrs         map[string]*os.File
-	keyDir           map[string]KeyDirEntry
-	mtx              sync.RWMutex
-	fileCnt          int
-	maxFileSizeBytes int64
-	mergeFileCnt     int
-	mergeFileOffset  int64
+	fileBasePath        string
+	currOffset          int64
+	filePtrs            map[string]*os.File
+	keyDir              map[string]KeyDirEntry
+	mtx                 sync.RWMutex
+	fileCnt             int
+	maxFileSizeBytes    int64
+	mergeFileCnt        int
+	mergeFileOffset     int64
+	mergeHintFileOffset int64
 }
 
 type mergeUpdate struct {
@@ -36,7 +38,139 @@ type mergeUpdate struct {
 	newEntry         KeyDirEntry
 }
 
+type mergeSegment struct {
+	id         int
+	dataPath   string
+	hintPath   string
+	dataFile   *os.File
+	hintFile   *os.File
+	dataOffset int64
+	hintOffset int64
+}
+
 const headerSize = 17 // crc(4) + tstamp(4) + ksz(4) + vsz(4) + flag(1)
+
+func (b *BitCask) openMergeSegment(id int) (*mergeSegment, error) {
+	dataPath := fmt.Sprintf("%smerge-%d.data", b.fileBasePath, id)
+	hintPath := fmt.Sprintf("%smerge-%d.hint", b.fileBasePath, id)
+
+	dataAlreadyExists := true
+	_, err := os.Stat(dataPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			dataAlreadyExists = false
+		} else {
+			return nil, err
+		}
+	}
+
+	dataFile, err := os.OpenFile(dataPath, os.O_CREATE|os.O_RDWR, 0644)
+	if err != nil {
+		return nil, err
+	}
+
+	hintFile, err := os.OpenFile(hintPath, os.O_CREATE|os.O_RDWR, 0644)
+	if err != nil {
+		dataFile.Close()
+		if !dataAlreadyExists {
+			os.Remove(dataPath)
+		}
+		return nil, err
+	}
+
+	dataInfo, err := dataFile.Stat()
+	if err != nil {
+		dataFile.Close()
+		hintFile.Close()
+		return nil, err
+	}
+
+	hintInfo, err := hintFile.Stat()
+	if err != nil {
+		dataFile.Close()
+		hintFile.Close()
+		return nil, err
+	}
+
+	return &mergeSegment{
+		id:         id,
+		dataPath:   dataPath,
+		hintPath:   hintPath,
+		dataFile:   dataFile,
+		hintFile:   hintFile,
+		dataOffset: dataInfo.Size(),
+		hintOffset: hintInfo.Size(),
+	}, nil
+}
+
+func (m *mergeSegment) sync() error {
+	if err := m.dataFile.Sync(); err != nil {
+		return err
+	}
+	if err := m.hintFile.Sync(); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (m *mergeSegment) closeHint() error {
+	return m.hintFile.Close()
+}
+
+func (b *BitCask) rotateMergeSegmentLocked(segment *mergeSegment) (*mergeSegment, error) {
+	if err := segment.sync(); err != nil {
+		return nil, err
+	}
+	if err := segment.closeHint(); err != nil {
+		return nil, err
+	}
+
+	b.mergeFileCnt++
+	nextSegment, err := b.openMergeSegment(b.mergeFileCnt)
+	if err != nil {
+		return nil, err
+	}
+	b.filePtrs[nextSegment.dataPath] = nextSegment.dataFile
+	return nextSegment, nil
+}
+
+func (b *BitCask) ensureMergeSegmentCapacityLocked(segment *mergeSegment, nextDataSize int64) (*mergeSegment, error) {
+	if segment.dataOffset+nextDataSize <= b.maxFileSizeBytes {
+		return segment, nil
+	}
+
+	fmt.Printf("Creating new file counter for merge files when offset is %d\n", segment.dataOffset)
+	return b.rotateMergeSegmentLocked(segment)
+}
+
+func (m *mergeSegment) appendEntry(entryBuf []byte, key []byte, valueSize uint32) (KeyDirEntry, error) {
+	_, err := m.dataFile.WriteAt(entryBuf, m.dataOffset)
+	if err != nil {
+		return KeyDirEntry{}, err
+	}
+
+	hintRecordBuf := make([]byte, 16+len(key))
+	binary.LittleEndian.PutUint32(hintRecordBuf[0:4], uint32(len(key)))
+	binary.LittleEndian.PutUint32(hintRecordBuf[4:8], valueSize)
+	binary.LittleEndian.PutUint64(hintRecordBuf[8:16], uint64(m.dataOffset))
+	copy(hintRecordBuf[16:], key)
+
+	_, err = m.hintFile.WriteAt(hintRecordBuf, m.hintOffset)
+	if err != nil {
+		return KeyDirEntry{}, err
+	}
+
+	entry := KeyDirEntry{
+		filePath:        m.dataPath,
+		fileEntryOffset: m.dataOffset,
+		valueSize:       valueSize,
+	}
+
+	m.dataOffset += int64(len(entryBuf))
+	m.hintOffset += int64(len(hintRecordBuf))
+
+	return entry, nil
+}
 
 func (b *BitCask) put(key, value []byte, flag byte) error {
 
@@ -126,14 +260,23 @@ func (b *BitCask) Get(key []byte) ([]byte, error) {
 	}
 
 	filePtr := b.filePtrs[keyDirEntry.filePath]
-	b.mtx.RUnlock()
-
-	keyLen := len(key)
-
-	buf := make([]byte, headerSize+keyLen+int(keyDirEntry.valueSize))
-	_, err := filePtr.ReadAt(buf, keyDirEntry.fileEntryOffset)
+	headerBuf := make([]byte, headerSize)
+	_, err := filePtr.ReadAt(headerBuf, keyDirEntry.fileEntryOffset)
 	if err != nil {
 		fmt.Println("Error occurred while reading from offset:", err)
+		b.mtx.RUnlock()
+		return nil, err
+	}
+
+	storedKeySize := binary.LittleEndian.Uint32(headerBuf[8:12])
+	storedValueSize := binary.LittleEndian.Uint32(headerBuf[12:16])
+	flag := headerBuf[16]
+
+	buf := make([]byte, headerSize+int(storedKeySize)+int(storedValueSize))
+	_, err = filePtr.ReadAt(buf, keyDirEntry.fileEntryOffset)
+	b.mtx.RUnlock()
+	if err != nil {
+		fmt.Println("Error occurred while reading full entry from offset:", err)
 		return nil, err
 	}
 
@@ -144,27 +287,37 @@ func (b *BitCask) Get(key []byte) ([]byte, error) {
 		return nil, errors.New("Corrupted entry found")
 	}
 
-	fmt.Println("Returned value: ", string(buf[headerSize+keyLen:]))
-	return buf[headerSize+keyLen:], nil
+	storedKey := buf[headerSize : headerSize+int(storedKeySize)]
+	if string(storedKey) != string(key) {
+		fmt.Println("Stored key doesn't match requested key")
+		return nil, errors.New("Key mismatch")
+	}
+
+	if flag == 1 {
+		fmt.Println("Key is marked deleted")
+		return nil, errors.New("Key not found")
+	}
+
+	value := buf[headerSize+int(storedKeySize):]
+	fmt.Println("Returned value: ", string(value))
+	return value, nil
 }
 
 func (b *BitCask) Merge() {
-
 	b.mtx.Lock()
 	activeFilePath := fmt.Sprintf("%s%d.data", b.fileBasePath, b.fileCnt)
-	mergeFilePath := fmt.Sprintf("%smerge-%d.data", b.fileBasePath, b.mergeFileCnt)
-	mergeFilePtr, err := os.OpenFile(mergeFilePath, os.O_CREATE|os.O_RDWR, 0644)
+	segment, err := b.openMergeSegment(b.mergeFileCnt)
 	if err != nil {
-		fmt.Println("Error occurred while creating filePtr:", err)
+		fmt.Println("Error occurred while creating merge segment:", err)
 		b.mtx.Unlock()
 		return
 	}
-	b.filePtrs[mergeFilePath] = mergeFilePtr
+	b.filePtrs[segment.dataPath] = segment.dataFile
 
 	// Snapshot all immutable file paths (everything except active and current merge file)
 	var immutableFiles []string
 	for path := range b.filePtrs {
-		if path != activeFilePath && path != mergeFilePath {
+		if path != activeFilePath && path != segment.dataPath {
 			immutableFiles = append(immutableFiles, path)
 		}
 	}
@@ -225,24 +378,32 @@ func (b *BitCask) Merge() {
 					offset := keyDirEntry.fileEntryOffset
 					valSize := keyDirEntry.valueSize
 					if path == filePath && offset == curOffset && valSize == valueSize {
-						_, err := mergeFilePtr.WriteAt(buf1, b.mergeFileOffset)
+						b.mtx.Lock()
+						segment, err = b.ensureMergeSegmentCapacityLocked(segment, blockSize)
 						if err != nil {
-							fmt.Printf("Error occurred while writing entry: %v\n", err)
+							fmt.Printf("Error occurred while rotating merge segment: %v\n", err)
+							b.mtx.Unlock()
 							fileMergedSuccessfully = false
 							break
 						}
+
+						newEntry, err := segment.appendEntry(buf1, key, valueSize)
+						b.mergeFileOffset = segment.dataOffset
+						b.mergeHintFileOffset = segment.hintOffset
+						b.mtx.Unlock()
+						if err != nil {
+							fmt.Printf("Error occurred while appending merged entry: %v\n", err)
+							fileMergedSuccessfully = false
+							break
+						}
+
 						fmt.Printf("Updating the entry for key: %s\n", keyStr)
 						pendingUpdates[keyStr] = mergeUpdate{
 							originalFilePath: filePath,
 							originalOffset:   curOffset,
 							originalValSize:  valueSize,
-							newEntry: KeyDirEntry{
-								filePath:        mergeFilePath,
-								fileEntryOffset: b.mergeFileOffset,
-								valueSize:       valSize,
-							},
+							newEntry:         newEntry,
 						}
-						b.mergeFileOffset += blockSize
 					}
 				}
 			}
@@ -251,6 +412,20 @@ func (b *BitCask) Merge() {
 		}
 
 		b.mtx.Lock()
+
+		// Sync the merge files to disk before you do deletion of the
+		err = segment.sync()
+		if err != nil {
+			fmt.Printf("Error occurred while syncing merge segment: %v\n", err)
+			b.mtx.Unlock()
+			continue
+		}
+
+		if !fileMergedSuccessfully {
+			fmt.Printf("Skipping cleanup of %s due to merge errors\n", filePath)
+			b.mtx.Unlock()
+			continue
+		}
 
 		for keyStr, update := range pendingUpdates {
 			current, ok := b.keyDir[keyStr]
@@ -261,32 +436,23 @@ func (b *BitCask) Merge() {
 			}
 		}
 
-		if !fileMergedSuccessfully {
-			fmt.Printf("Skipping cleanup of %s due to merge errors\n", filePath)
-			b.mtx.Unlock()
-			continue
-		}
-
 		filePtr.Close()
 		delete(b.filePtrs, filePath)
 		os.Remove(filePath)
 
-		if b.mergeFileOffset >= b.maxFileSizeBytes {
-			fmt.Printf("Creating new file counter for merge files when offset is %d\n", b.mergeFileOffset)
-			b.mergeFileCnt++
-			b.mergeFileOffset = 0
-
-			mergeFilePath = fmt.Sprintf("%smerge-%d.data", b.fileBasePath, b.mergeFileCnt)
-			mergeFilePtr, err = os.OpenFile(mergeFilePath, os.O_CREATE|os.O_RDWR, 0644)
-			if err != nil {
-				fmt.Println("Error occurred while creating filePtr:", err)
-				b.mtx.Unlock()
-				return
-			}
-			b.filePtrs[mergeFilePath] = mergeFilePtr
+		if strings.Contains(filePath, "merge") {
+			hintFilePath := strings.TrimSuffix(filePath, ".data") + ".hint"
+			os.Remove(hintFilePath)
 		}
 
+		b.mergeFileOffset = segment.dataOffset
+		b.mergeHintFileOffset = segment.hintOffset
 		b.mtx.Unlock()
+	}
+
+	err = segment.closeHint()
+	if err != nil {
+		fmt.Println("Error occurred while closing merge hint file:", err)
 	}
 
 }
@@ -313,13 +479,10 @@ func main() {
 	for i := range 10000 {
 		str := fmt.Sprint(i)
 		bitCask.Put([]byte(str), []byte(str))
-		val, _ := bitCask.Get([]byte(str))
-		if string(val) != str {
-			fmt.Println("Bug detected")
-		}
+		bitCask.Get([]byte(str))
 	}
 
-	bitCask.Merge()
-	bitCask.Merge()
+	// bitCask.Merge()
+	// bitCask.Merge()
 
 }
