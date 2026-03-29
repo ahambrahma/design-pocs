@@ -50,195 +50,16 @@ type mergeSegment struct {
 
 const headerSize = 17 // crc(4) + tstamp(4) + ksz(4) + vsz(4) + flag(1)
 
-func (b *BitCask) openMergeSegment(id int) (*mergeSegment, error) {
-	dataPath := fmt.Sprintf("%smerge-%d.data", b.fileBasePath, id)
-	hintPath := fmt.Sprintf("%smerge-%d.hint", b.fileBasePath, id)
-
-	dataAlreadyExists := true
-	_, err := os.Stat(dataPath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			dataAlreadyExists = false
-		} else {
-			return nil, err
-		}
+func New() *BitCask {
+	return &BitCask{
+		fileBasePath:     "./",
+		fileCnt:          1,
+		mergeFileCnt:     1,
+		keyDir:           make(map[string]KeyDirEntry),
+		currOffset:       0,
+		maxFileSizeBytes: 65536,
+		filePtrs:         make(map[string]*os.File),
 	}
-
-	dataFile, err := os.OpenFile(dataPath, os.O_CREATE|os.O_RDWR, 0644)
-	if err != nil {
-		return nil, err
-	}
-
-	hintFile, err := os.OpenFile(hintPath, os.O_CREATE|os.O_RDWR, 0644)
-	if err != nil {
-		dataFile.Close()
-		if !dataAlreadyExists {
-			os.Remove(dataPath)
-		}
-		return nil, err
-	}
-
-	dataInfo, err := dataFile.Stat()
-	if err != nil {
-		dataFile.Close()
-		hintFile.Close()
-		return nil, err
-	}
-
-	hintInfo, err := hintFile.Stat()
-	if err != nil {
-		dataFile.Close()
-		hintFile.Close()
-		return nil, err
-	}
-
-	return &mergeSegment{
-		id:         id,
-		dataPath:   dataPath,
-		hintPath:   hintPath,
-		dataFile:   dataFile,
-		hintFile:   hintFile,
-		dataOffset: dataInfo.Size(),
-		hintOffset: hintInfo.Size(),
-	}, nil
-}
-
-func (m *mergeSegment) sync() error {
-	if err := m.dataFile.Sync(); err != nil {
-		return err
-	}
-	if err := m.hintFile.Sync(); err != nil {
-		return err
-	}
-	return nil
-}
-
-func (m *mergeSegment) closeHint() error {
-	return m.hintFile.Close()
-}
-
-func (b *BitCask) rotateMergeSegmentLocked(segment *mergeSegment) (*mergeSegment, error) {
-	if err := segment.sync(); err != nil {
-		return nil, err
-	}
-	if err := segment.closeHint(); err != nil {
-		return nil, err
-	}
-
-	b.mergeFileCnt++
-	nextSegment, err := b.openMergeSegment(b.mergeFileCnt)
-	if err != nil {
-		return nil, err
-	}
-	b.filePtrs[nextSegment.dataPath] = nextSegment.dataFile
-	return nextSegment, nil
-}
-
-func (b *BitCask) ensureMergeSegmentCapacityLocked(segment *mergeSegment, nextDataSize int64) (*mergeSegment, error) {
-	if segment.dataOffset+nextDataSize <= b.maxFileSizeBytes {
-		return segment, nil
-	}
-
-	fmt.Printf("Creating new file counter for merge files when offset is %d\n", segment.dataOffset)
-	return b.rotateMergeSegmentLocked(segment)
-}
-
-func (m *mergeSegment) appendEntry(entryBuf []byte, key []byte, valueSize uint32) (KeyDirEntry, error) {
-	_, err := m.dataFile.WriteAt(entryBuf, m.dataOffset)
-	if err != nil {
-		return KeyDirEntry{}, err
-	}
-
-	hintRecordBuf := make([]byte, 16+len(key))
-	binary.LittleEndian.PutUint32(hintRecordBuf[0:4], uint32(len(key)))
-	binary.LittleEndian.PutUint32(hintRecordBuf[4:8], valueSize)
-	binary.LittleEndian.PutUint64(hintRecordBuf[8:16], uint64(m.dataOffset))
-	copy(hintRecordBuf[16:], key)
-
-	_, err = m.hintFile.WriteAt(hintRecordBuf, m.hintOffset)
-	if err != nil {
-		return KeyDirEntry{}, err
-	}
-
-	entry := KeyDirEntry{
-		filePath:        m.dataPath,
-		fileEntryOffset: m.dataOffset,
-		valueSize:       valueSize,
-	}
-
-	m.dataOffset += int64(len(entryBuf))
-	m.hintOffset += int64(len(hintRecordBuf))
-
-	return entry, nil
-}
-
-func (b *BitCask) put(key, value []byte, flag byte) error {
-
-	keyLen := len(key)
-	valueLen := len(value)
-	timestamp := uint32(time.Now().Unix())
-
-	entrySize := headerSize + keyLen + valueLen
-	buf := make([]byte, entrySize)
-	binary.LittleEndian.PutUint32(buf[4:8], timestamp)
-	binary.LittleEndian.PutUint32(buf[8:12], uint32(keyLen))
-	binary.LittleEndian.PutUint32(buf[12:16], uint32(valueLen))
-	buf[16] = flag
-	copy(buf[headerSize:], key)
-	copy(buf[headerSize+keyLen:], value)
-
-	checkSum := crc32.ChecksumIEEE(buf[4:])
-	binary.LittleEndian.PutUint32(buf[0:4], checkSum)
-
-	keyStr := string(key)
-
-	b.mtx.Lock()
-	defer b.mtx.Unlock()
-	filePath := fmt.Sprintf("%s%d.data", b.fileBasePath, b.fileCnt)
-	if len(b.filePtrs) == 0 {
-		filePtr, err := os.OpenFile(filePath, os.O_CREATE|os.O_RDWR, 0644)
-		if err != nil {
-			fmt.Println("Error occurred while creating filePtr:", err)
-			return err
-		}
-		b.filePtrs[filePath] = filePtr
-	}
-
-	numBytes, err := b.filePtrs[filePath].WriteAt(buf, b.currOffset)
-	if err != nil {
-		fmt.Printf("Error occurred while writing to file for key: %s: %v\n", keyStr, err)
-		return err
-	}
-	if numBytes != entrySize {
-		fmt.Printf("Incomplete entry written for key: %s\n", keyStr)
-		return errors.New("Incomplete entry written")
-	}
-
-	if flag == 0 {
-		b.keyDir[keyStr] = KeyDirEntry{
-			filePath,
-			b.currOffset,
-			uint32(valueLen),
-		}
-	} else {
-		delete(b.keyDir, keyStr)
-	}
-
-	b.currOffset += int64(entrySize)
-
-	if b.currOffset >= b.maxFileSizeBytes {
-		b.fileCnt++
-		newFilePath := fmt.Sprintf("%s%d.data", b.fileBasePath, b.fileCnt)
-		filePtr, err := os.OpenFile(newFilePath, os.O_CREATE|os.O_RDWR, 0644)
-		if err != nil {
-			fmt.Println("Error occurred while creating filePtr:", err)
-			return err
-		}
-		b.filePtrs[newFilePath] = filePtr
-		b.currOffset = 0
-	}
-
-	return nil
 }
 
 func (b *BitCask) Put(key, value []byte) error {
@@ -457,16 +278,195 @@ func (b *BitCask) Merge() {
 
 }
 
-func New() *BitCask {
-	return &BitCask{
-		fileBasePath:     "./",
-		fileCnt:          1,
-		mergeFileCnt:     1,
-		keyDir:           make(map[string]KeyDirEntry),
-		currOffset:       0,
-		maxFileSizeBytes: 65536,
-		filePtrs:         make(map[string]*os.File),
+func (b *BitCask) put(key, value []byte, flag byte) error {
+
+	keyLen := len(key)
+	valueLen := len(value)
+	timestamp := uint32(time.Now().Unix())
+
+	entrySize := headerSize + keyLen + valueLen
+	buf := make([]byte, entrySize)
+	binary.LittleEndian.PutUint32(buf[4:8], timestamp)
+	binary.LittleEndian.PutUint32(buf[8:12], uint32(keyLen))
+	binary.LittleEndian.PutUint32(buf[12:16], uint32(valueLen))
+	buf[16] = flag
+	copy(buf[headerSize:], key)
+	copy(buf[headerSize+keyLen:], value)
+
+	checkSum := crc32.ChecksumIEEE(buf[4:])
+	binary.LittleEndian.PutUint32(buf[0:4], checkSum)
+
+	keyStr := string(key)
+
+	b.mtx.Lock()
+	defer b.mtx.Unlock()
+	filePath := fmt.Sprintf("%s%d.data", b.fileBasePath, b.fileCnt)
+	if len(b.filePtrs) == 0 {
+		filePtr, err := os.OpenFile(filePath, os.O_CREATE|os.O_RDWR, 0644)
+		if err != nil {
+			fmt.Println("Error occurred while creating filePtr:", err)
+			return err
+		}
+		b.filePtrs[filePath] = filePtr
 	}
+
+	numBytes, err := b.filePtrs[filePath].WriteAt(buf, b.currOffset)
+	if err != nil {
+		fmt.Printf("Error occurred while writing to file for key: %s: %v\n", keyStr, err)
+		return err
+	}
+	if numBytes != entrySize {
+		fmt.Printf("Incomplete entry written for key: %s\n", keyStr)
+		return errors.New("Incomplete entry written")
+	}
+
+	if flag == 0 {
+		b.keyDir[keyStr] = KeyDirEntry{
+			filePath,
+			b.currOffset,
+			uint32(valueLen),
+		}
+	} else {
+		delete(b.keyDir, keyStr)
+	}
+
+	b.currOffset += int64(entrySize)
+
+	if b.currOffset >= b.maxFileSizeBytes {
+		b.fileCnt++
+		newFilePath := fmt.Sprintf("%s%d.data", b.fileBasePath, b.fileCnt)
+		filePtr, err := os.OpenFile(newFilePath, os.O_CREATE|os.O_RDWR, 0644)
+		if err != nil {
+			fmt.Println("Error occurred while creating filePtr:", err)
+			return err
+		}
+		b.filePtrs[newFilePath] = filePtr
+		b.currOffset = 0
+	}
+
+	return nil
+}
+
+func (b *BitCask) openMergeSegment(id int) (*mergeSegment, error) {
+	dataPath := fmt.Sprintf("%smerge-%d.data", b.fileBasePath, id)
+	hintPath := fmt.Sprintf("%smerge-%d.hint", b.fileBasePath, id)
+
+	dataAlreadyExists := true
+	_, err := os.Stat(dataPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			dataAlreadyExists = false
+		} else {
+			return nil, err
+		}
+	}
+
+	dataFile, err := os.OpenFile(dataPath, os.O_CREATE|os.O_RDWR, 0644)
+	if err != nil {
+		return nil, err
+	}
+
+	hintFile, err := os.OpenFile(hintPath, os.O_CREATE|os.O_RDWR, 0644)
+	if err != nil {
+		dataFile.Close()
+		if !dataAlreadyExists {
+			os.Remove(dataPath)
+		}
+		return nil, err
+	}
+
+	dataInfo, err := dataFile.Stat()
+	if err != nil {
+		dataFile.Close()
+		hintFile.Close()
+		return nil, err
+	}
+
+	hintInfo, err := hintFile.Stat()
+	if err != nil {
+		dataFile.Close()
+		hintFile.Close()
+		return nil, err
+	}
+
+	return &mergeSegment{
+		id:         id,
+		dataPath:   dataPath,
+		hintPath:   hintPath,
+		dataFile:   dataFile,
+		hintFile:   hintFile,
+		dataOffset: dataInfo.Size(),
+		hintOffset: hintInfo.Size(),
+	}, nil
+}
+
+func (b *BitCask) rotateMergeSegmentLocked(segment *mergeSegment) (*mergeSegment, error) {
+	if err := segment.sync(); err != nil {
+		return nil, err
+	}
+	if err := segment.closeHint(); err != nil {
+		return nil, err
+	}
+
+	b.mergeFileCnt++
+	nextSegment, err := b.openMergeSegment(b.mergeFileCnt)
+	if err != nil {
+		return nil, err
+	}
+	b.filePtrs[nextSegment.dataPath] = nextSegment.dataFile
+	return nextSegment, nil
+}
+
+func (b *BitCask) ensureMergeSegmentCapacityLocked(segment *mergeSegment, nextDataSize int64) (*mergeSegment, error) {
+	if segment.dataOffset+nextDataSize <= b.maxFileSizeBytes {
+		return segment, nil
+	}
+
+	fmt.Printf("Creating new file counter for merge files when offset is %d\n", segment.dataOffset)
+	return b.rotateMergeSegmentLocked(segment)
+}
+
+func (m *mergeSegment) sync() error {
+	if err := m.dataFile.Sync(); err != nil {
+		return err
+	}
+	if err := m.hintFile.Sync(); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (m *mergeSegment) closeHint() error {
+	return m.hintFile.Close()
+}
+
+func (m *mergeSegment) appendEntry(entryBuf []byte, key []byte, valueSize uint32) (KeyDirEntry, error) {
+	_, err := m.dataFile.WriteAt(entryBuf, m.dataOffset)
+	if err != nil {
+		return KeyDirEntry{}, err
+	}
+
+	hintRecordBuf := make([]byte, 16+len(key))
+	binary.LittleEndian.PutUint32(hintRecordBuf[0:4], uint32(len(key)))
+	binary.LittleEndian.PutUint32(hintRecordBuf[4:8], valueSize)
+	binary.LittleEndian.PutUint64(hintRecordBuf[8:16], uint64(m.dataOffset))
+	copy(hintRecordBuf[16:], key)
+
+	_, err = m.hintFile.WriteAt(hintRecordBuf, m.hintOffset)
+	if err != nil {
+		return KeyDirEntry{}, err
+	}
+
+	entry := KeyDirEntry{
+		filePath:        m.dataPath,
+		fileEntryOffset: m.dataOffset,
+		valueSize:       valueSize,
+	}
+
+	m.dataOffset += int64(len(entryBuf))
+	m.hintOffset += int64(len(hintRecordBuf))
+
+	return entry, nil
 }
 
 func main() {
